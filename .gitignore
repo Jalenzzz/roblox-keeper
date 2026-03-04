@@ -1,1 +1,10 @@
-local.properties
+  # Local machine config
+  local.properties
+
+  # Build/cache
+  .gradle/
+  build/
+
+  # IDE
+  .idea/
+  *.iml
