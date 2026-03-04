@@ -3,6 +3,7 @@ local.properties
 
 # Build/cache
 .gradle/
+.gradle-user/
 build/
 
 # IDE
