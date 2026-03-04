@@ -1,11 +1,11 @@
 plugins {
-    id("com.android.application")
-    id("kotlin-android")
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
 }
 
 
 android {
-    namespace = "com.example.robloxkeeper"  // <<< 新增這行，解決錯誤
+    namespace = "com.example.robloxkeeper"
     compileSdk = 36
     defaultConfig {
         applicationId = "com.example.robloxkeeper"  // Update if needed
@@ -22,7 +22,7 @@ android {
         }
     }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17  // Updated for modern JDK
+        sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions {
@@ -31,9 +31,9 @@ android {
 }
 
 dependencies {
-    implementation(libs.androidx.core.ktx.v1131)  // Latest
-    implementation(libs.androidx.appcompat)  // Latest
-    implementation(libs.material)  // Latest
-    implementation(libs.androidx.constraintlayout)  // Latest
-    implementation(libs.androidx.work.runtime.ktx)  // Latest
+    implementation(libs.androidx.core.ktx.v1131)
+    implementation(libs.androidx.appcompat)
+    implementation(libs.material)
+    implementation(libs.androidx.constraintlayout)
+    implementation(libs.androidx.work.runtime.ktx)
 }
