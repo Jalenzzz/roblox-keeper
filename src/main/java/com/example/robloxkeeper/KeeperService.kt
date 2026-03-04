@@ -16,38 +16,31 @@ class KeeperService : Service() {
         private const val CHANNEL_ID = "keeper_channel"
         private const val TAG = "KeeperService"
         private const val TARGET_PACKAGE = "com.roblox.client"
-        private const val DEEPLINK = "https://www.roblox.com/share?code=c00bc130c108844d800e144db1ed8352&type=Server"
+        private const val DEEPLINK = "roblox://experiences/start?placeId=606849621"
         private const val CHECK_INTERVAL = 10000L
-        private const val KILL_INTERVAL = 3600000L
     }
 
     private val handler = Handler(Looper.getMainLooper())
     private var lastNotForeground = false
+    private var hasSeenRobloxForeground = false
 
     private val timerTask = object : Runnable {
         override fun run() {
             val isRobloxForeground = isForegroundApp(TARGET_PACKAGE)
             Log.d(TAG, "Is Roblox in foreground? $isRobloxForeground")
 
-            if (!isRobloxForeground) {
+            if (isRobloxForeground) {
+                hasSeenRobloxForeground = true
+                lastNotForeground = false
+            } else if (hasSeenRobloxForeground) {
                 if (lastNotForeground) {
                     openDeeplink()
                 } else {
                     lastNotForeground = true
                 }
-            } else {
-                lastNotForeground = false
             }
 
             handler.postDelayed(this, CHECK_INTERVAL)
-        }
-    }
-
-    private val killTask = object : Runnable {
-        override fun run() {
-            killTargetPackage(TARGET_PACKAGE)
-            Log.d(TAG, "Killed target package: $TARGET_PACKAGE")
-            handler.postDelayed(this, KILL_INTERVAL)
         }
     }
 
@@ -56,14 +49,12 @@ class KeeperService : Service() {
         isRunning = true
         startForeground(NOTIFICATION_ID, createNotification())
         handler.post(timerTask)
-        handler.postDelayed(killTask, KILL_INTERVAL)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         isRunning = false
         handler.removeCallbacks(timerTask)
-        handler.removeCallbacks(killTask)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -114,14 +105,4 @@ class KeeperService : Service() {
         }
     }
 
-    private fun killTargetPackage(packageName: String) {
-        try {
-            val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-            am.killBackgroundProcesses(packageName)
-            Runtime.getRuntime().exec("am force-stop $packageName")
-            Log.d(TAG, "Force-stopped $packageName")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to kill package $packageName", e)
-        }
-    }
 }
