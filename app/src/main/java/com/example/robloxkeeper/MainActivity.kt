@@ -7,19 +7,20 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Bundle
 import android.provider.Settings
-import android.widget.Button
-import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.switchmaterial.SwitchMaterial
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var toggleSwitch: Switch
+    private lateinit var toggleSwitch: SwitchMaterial
     private lateinit var logsView: TextView
-    private lateinit var copyLogsButton: Button
-    private lateinit var clearLogsButton: Button
+    private lateinit var serviceStatusLabel: TextView
+    private lateinit var copyLogsButton: MaterialButton
+    private lateinit var clearLogsButton: MaterialButton
     private val logsReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == KeeperService.ACTION_LOG_UPDATE) {
@@ -34,6 +35,7 @@ class MainActivity : AppCompatActivity() {
 
         toggleSwitch = findViewById(R.id.toggle_switch)
         logsView = findViewById(R.id.logs_view)
+        serviceStatusLabel = findViewById(R.id.service_status_label)
         copyLogsButton = findViewById(R.id.copy_logs_button)
         clearLogsButton = findViewById(R.id.clear_logs_button)
 
@@ -43,9 +45,13 @@ class MainActivity : AppCompatActivity() {
                     startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
                 } else {
                     startService(Intent(this, KeeperService::class.java))
+                    serviceStatusLabel.text = "Active"
+                    serviceStatusLabel.setTextColor(0xFF4CAF50.toInt())
                 }
             } else {
                 stopService(Intent(this, KeeperService::class.java))
+                serviceStatusLabel.text = "Inactive"
+                serviceStatusLabel.setTextColor(0xFF888888.toInt())
             }
         }
 
@@ -64,6 +70,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         toggleSwitch.isChecked = KeeperService.isRunning
+        if (KeeperService.isRunning) {
+            serviceStatusLabel.text = "Active"
+            serviceStatusLabel.setTextColor(0xFF4CAF50.toInt())
+        }
         renderLogs()
     }
 

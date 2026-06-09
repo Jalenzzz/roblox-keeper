@@ -186,20 +186,20 @@ class KeeperService : Service() {
                     if (secondsAgo >= 150) {
                         logEvent("Heartbeat stale (${minutes}m ${seconds}s) — relaunching and killing Roblox")
                         handler.post {
-                            openDeeplink()
+                            killRoblox()
                             hasBeenForeground = false
                             lastNotForeground = false
                         }
-                        handler.postDelayed({ killRoblox() }, 2000)
+                        handler.postDelayed({ openDeeplink() }, 2000)
                     } else Unit
                 } else {
                     logEvent("Heartbeat: bot ID $botId not found — relaunching")
                     handler.post {
-                        openDeeplink()
+                        killRoblox()
                         hasBeenForeground = false
                         lastNotForeground = false
                     }
-                    handler.postDelayed({ killRoblox() }, 2000)
+                    handler.postDelayed({ openDeeplink() }, 2000)
                 }
             }
         } catch (e: Exception) {
@@ -227,20 +227,28 @@ class KeeperService : Service() {
     }
 
     private fun isForegroundApp(packageName: String): Boolean {
-        var process: java.lang.Process? = null
-        return try {
-            process = Runtime.getRuntime().exec(arrayOf("su", "-c", "dumpsys activity activities"))
-            val output = process.inputStream.bufferedReader().readText()
-            process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
-            val resumedLine = output.lineSequence().firstOrNull { it.contains("mResumedActivity") }
-            Log.d(TAG, "mResumedActivity: $resumedLine")
-            resumedLine?.contains(packageName) ?: false
-        } catch (e: Exception) {
-            Log.e(TAG, "Foreground check failed", e)
-            false
-        } finally {
-            process?.destroy()
+        // Try dumpsys window displays first (Android 10+), fall back to activity activities
+        for (cmd in listOf(
+            "dumpsys window displays",
+            "dumpsys activity activities"
+        )) {
+            var process: java.lang.Process? = null
+            try {
+                process = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
+                val output = process.inputStream.bufferedReader().readText()
+                process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
+                val matchLine = output.lineSequence().firstOrNull {
+                    it.contains("mCurrentFocus") || it.contains("mFocusedApp") || it.contains("mResumedActivity")
+                }
+                Log.d(TAG, "$cmd match: $matchLine")
+                if (matchLine?.contains(packageName) == true) return true
+            } catch (e: Exception) {
+                Log.e(TAG, "Foreground check failed ($cmd)", e)
+            } finally {
+                process?.destroy()
+            }
         }
+        return false
     }
 
     private fun openDeeplink() {
