@@ -17,3 +17,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "lin6Macro"
+include(":app")
