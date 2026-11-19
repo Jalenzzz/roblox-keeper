@@ -323,6 +323,8 @@ class KeeperService : Service() {
         startLogcatMonitor()
     }
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+
     override fun onDestroy() {
         super.onDestroy()
         isRunning = false
