@@ -27,6 +27,10 @@ class MainActivity : AppCompatActivity() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == KeeperService.ACTION_LOG_UPDATE) {
                 renderLogs()
+                if (toggleSwitch.isChecked && KeeperService.isRunning) {
+                    serviceStatusLabel.text = "Active"
+                    serviceStatusLabel.setTextColor(0xFF4CAF50.toInt())
+                }
             }
         }
     }
@@ -43,14 +47,16 @@ class MainActivity : AppCompatActivity() {
         copyLogsButton = findViewById(R.id.copy_logs_button)
         clearLogsButton = findViewById(R.id.clear_logs_button)
 
+        val preferences = getPreferences(Context.MODE_PRIVATE)
+        toggleSwitch.isChecked = preferences.getBoolean("monitoring_enabled", KeeperService.isRunning)
+        preferences.edit().putBoolean("monitoring_enabled", toggleSwitch.isChecked).apply()
         toggleSwitch.setOnCheckedChangeListener { _, isChecked ->
+            preferences.edit().putBoolean("monitoring_enabled", isChecked).apply()
             if (isChecked) {
                 if (!hasUsageStatsPermission()) {
                     startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
                 } else {
-                    startService(Intent(this, KeeperService::class.java))
-                    serviceStatusLabel.text = "Active"
-                    serviceStatusLabel.setTextColor(0xFF4CAF50.toInt())
+                    resumeMonitoring()
                 }
             } else {
                 stopService(Intent(this, KeeperService::class.java))
@@ -82,13 +88,26 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, R.string.logs_cleared, Toast.LENGTH_SHORT).show()
         }
 
-        toggleSwitch.isChecked = KeeperService.isRunning
-        if (KeeperService.isRunning) {
-            serviceStatusLabel.text = "Active"
-            serviceStatusLabel.setTextColor(0xFF4CAF50.toInt())
-        }
         pauseSwitch.isChecked = KeeperService.isManuallyPaused
         renderLogs()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (toggleSwitch.isChecked) resumeMonitoring()
+    }
+
+    private fun resumeMonitoring() {
+        if (!hasUsageStatsPermission()) {
+            serviceStatusLabel.text = "Usage access required"
+            serviceStatusLabel.setTextColor(0xFF888888.toInt())
+            return
+        }
+        if (!KeeperService.isRunning) {
+            ContextCompat.startForegroundService(this, Intent(this, KeeperService::class.java))
+        }
+        serviceStatusLabel.text = if (KeeperService.isRunning) "Active" else "Starting"
+        serviceStatusLabel.setTextColor(0xFF4CAF50.toInt())
     }
 
     override fun onStart() {
