@@ -119,11 +119,92 @@ class KeeperService : Service() {
     private val MAIN_HOP_SUPPRESSION_MS = 15000L
     private val MAIN_JOIN_REQUEST_MAX_AGE_S = 60L
 
+    // /bot/assign hands out a live Jailbreak server no bot has claimed or
+    // scanned in the last 10 minutes, so hopping there can never land the
+    // bot back in the server it just scanned.
+    private val ASSIGN_URL = "https://inventories.jailbreakchangelogs.com/bot/assign?bot_id="
+    private val MAIN_PLACE_ID = 606849621L
+
+    // The bot script empties mainJoinRequest as soon as it starts in a new
+    // Main World server. If the request we acted on is still there after
+    // HOP_CONFIRM_TIMEOUT_MS, the hop didn't take (server full / gone) and we
+    // retry with a fresh server, up to MAX_HOP_ATTEMPTS times in total; after
+    // that the heartbeat recovery takes over.
+    private val HOP_CONFIRM_TIMEOUT_MS = 45_000L
+    private val MAX_HOP_ATTEMPTS = 4
+
+    private data class PendingHop(val sourceJobId: String, val firedAt: Long, val attempts: Int)
+
+    @Volatile private var pendingHop: PendingHop? = null
+
     private val mainJoinTask = object : Runnable {
         override fun run() {
             Thread { checkMainJoinRequest() }.start()
             handler.postDelayed(this, CHECK_INTERVAL)
         }
+    }
+
+    // A server nobody has claimed or scanned in the last 10 minutes, or null
+    // when the API can't give one (404: all taken, 502: server list down).
+    // Network call: never run this on the main thread.
+    private fun assignServer(): String? {
+        if (botId.isBlank()) return null
+        return try {
+            client.newCall(Request.Builder().url(ASSIGN_URL + botId).build()).execute().use { response ->
+                if (!response.isSuccessful) {
+                    logEvent("bot/assign failed: HTTP ${response.code}")
+                    null
+                } else {
+                    JSONObject(response.body!!.string()).optString("job_id", "").ifBlank { null }
+                }
+            }
+        } catch (e: Exception) {
+            logEvent("bot/assign error: ${e.message ?: "unknown"}")
+            null
+        }
+    }
+
+    // Deep-links Roblox into a specific server instance. Hot-routes a running
+    // client, and cold-starts Roblox into that instance if it isn't running.
+    private fun hopTo(placeId: Long, jobId: String) {
+        val url = "roblox://experiences/start?placeId=$placeId&gameInstanceId=$jobId"
+        logEvent("Main World hop requested: $url")
+        // Give the legacy foreground/heartbeat/crash triggers a window to
+        // back off, so they can't fire another relaunch while this hop is in
+        // flight.
+        suppressLegacyRelaunchUntil = System.currentTimeMillis() + MAIN_HOP_SUPPRESSION_MS
+
+        val cmd = "am start -W -a android.intent.action.VIEW -d \"$url\" $TARGET_PACKAGE"
+        val process = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
+        val output = process.inputStream.bufferedReader().readText().trim()
+        val errorOutput = process.errorStream.bufferedReader().readText().trim()
+        process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)
+
+        logEvent("Main World hop result: $output" + if (errorOutput.isNotBlank()) " | ERR: $errorOutput" else "")
+    }
+
+    // Called for a request we already acted on: if it's still in the file
+    // after HOP_CONFIRM_TIMEOUT_MS, the target server didn't take us (full or
+    // closed). /bot/assign won't hand that server out again (it's claimed),
+    // so ask for a fresh one and hop there.
+    private fun retryHopIfStuck(placeId: Long, sourceJobId: String) {
+        val pending = pendingHop ?: return
+        if (pending.sourceJobId != sourceJobId) return
+        if (System.currentTimeMillis() - pending.firedAt < HOP_CONFIRM_TIMEOUT_MS) return
+        if (pending.attempts >= MAX_HOP_ATTEMPTS) {
+            logEvent("Main World hop still hasn't landed after ${pending.attempts} attempts - leaving it to heartbeat recovery")
+            pendingHop = null
+            return
+        }
+        val jobId = assignServer()
+        if (jobId == null) {
+            logEvent("Main World hop didn't land and no fresh server is available yet - will retry")
+            pendingHop = pending.copy(firedAt = System.currentTimeMillis())
+            return
+        }
+        logEvent("Main World hop didn't land after ${HOP_CONFIRM_TIMEOUT_MS / 1000}s - retrying with $jobId")
+        hopTo(placeId, jobId)
+        pendingHop = PendingHop(sourceJobId, System.currentTimeMillis(), pending.attempts + 1)
     }
 
     private fun checkMainJoinRequest() {
@@ -133,10 +214,17 @@ class KeeperService : Service() {
                 Environment.getExternalStorageDirectory(),
                 "Delta/Workspace/mainJoinRequest$botId.json"
             )
-            if (!file.exists()) return
+            if (!file.exists()) {
+                pendingHop = null
+                return
+            }
 
             val raw = file.readText().trim()
-            if (raw.isBlank()) return
+            if (raw.isBlank()) {
+                // The script cleared it on arrival: the last hop landed.
+                pendingHop = null
+                return
+            }
 
             if (isRelaunchSuppressed()) {
                 // Don't mark it as seen: once un-paused/Firefox closes, this
@@ -150,10 +238,19 @@ class KeeperService : Service() {
             }
             lastDeferredJoinRequestRaw = null
 
-            if (raw == lastMainJoinRequestRaw) return
+            val json = JSONObject(raw)
+            val placeId = json.optLong("placeId", MAIN_PLACE_ID)
+            val sourceJobId = json.optString("sourceJobId", "")
+
+            if (raw == lastMainJoinRequestRaw) {
+                // Already acted on; retry if the hop didn't land. Checked
+                // before the staleness cutoff below, which would otherwise
+                // drop the request first.
+                retryHopIfStuck(placeId, sourceJobId)
+                return
+            }
             lastMainJoinRequestRaw = raw
 
-            val json = JSONObject(raw)
             val createdAt = json.optLong("createdAt", 0L)
             val ageSeconds = System.currentTimeMillis() / 1000 - createdAt
             if (createdAt <= 0L || ageSeconds > MAIN_JOIN_REQUEST_MAX_AGE_S) {
@@ -165,28 +262,23 @@ class KeeperService : Service() {
                 return
             }
 
-            val placeId = json.optLong("placeId", 606849621L)
-            val jobId = if (json.isNull("jobId")) null else json.optString("jobId", "").ifBlank { null }
+            val requestedJobId = if (json.isNull("jobId")) null else json.optString("jobId", "").ifBlank { null }
 
-            val url = if (jobId != null) {
-                "roblox://experiences/start?placeId=$placeId&gameInstanceId=$jobId"
-            } else {
-                "roblox://experiences/start?placeId=$placeId"
+            // Never hop without a target server: a bare
+            // experiences/start?placeId=... hands the running client to
+            // Roblox's matchmaking, which can put it straight back in the
+            // server it just scanned. The bot writes jobId=null when its own
+            // /bot/assign call failed, so ask for one here.
+            val jobId = requestedJobId ?: assignServer()
+            if (jobId == null) {
+                logEvent("Main World hop has no target server (assign failed) - retrying next tick")
+                lastMainJoinRequestRaw = null
+                return
             }
+            if (requestedJobId == null) logEvent("Main World hop request had no server; assigned $jobId")
 
-            logEvent("Main World hop requested: $url")
-            // Give the legacy foreground/heartbeat/crash triggers a window to
-            // back off, so they can't fire the static share-link relaunch
-            // while this hop is in flight.
-            suppressLegacyRelaunchUntil = System.currentTimeMillis() + MAIN_HOP_SUPPRESSION_MS
-
-            val cmd = "am start -W -a android.intent.action.VIEW -d \"$url\" $TARGET_PACKAGE"
-            val process = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
-            val output = process.inputStream.bufferedReader().readText().trim()
-            val errorOutput = process.errorStream.bufferedReader().readText().trim()
-            process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)
-
-            logEvent("Main World hop result: $output" + if (errorOutput.isNotBlank()) " | ERR: $errorOutput" else "")
+            hopTo(placeId, jobId)
+            pendingHop = PendingHop(sourceJobId, System.currentTimeMillis(), 1)
         } catch (e: Exception) {
             Log.e(TAG, "Main join check failed", e)
             logEvent("Main World hop error: ${e.message ?: "unknown"}")
@@ -388,15 +480,47 @@ class KeeperService : Service() {
             return false
         }
         loggedRelaunchSuppressed = false
-        return try {
+        // Callers are on the main thread; /bot/assign is a network call.
+        // Block further relaunches while this one is in flight (hopTo extends
+        // it once the hop is fired).
+        suppressLegacyRelaunchUntil = System.currentTimeMillis() + MAIN_HOP_SUPPRESSION_MS
+        Thread { relaunchIntoFreshServer() }.start()
+        return true
+    }
+
+    // Only Main World scanner bots (BOT_HOP_METHOD == 2) write
+    // mainJoinRequest; trade bots never do. They keep the share-link
+    // relaunch, and must not call /bot/assign, which claims a Main World
+    // server for 10 minutes and would keep the scanners away from it.
+    private fun isMainWorldBot(): Boolean = botId.isNotBlank() && File(
+        Environment.getExternalStorageDirectory(),
+        "Delta/Workspace/mainJoinRequest$botId.json"
+    ).exists()
+
+    // Recovery relaunch: for a Main World bot, into a server nobody has
+    // scanned in the last 10 minutes when the API can give one. The fixed
+    // share link (DEEPLINK) sent every recovering bot to the same shared
+    // server; for those bots it's now only the fallback when /bot/assign is
+    // unavailable.
+    private fun relaunchIntoFreshServer() {
+        val jobId = if (isMainWorldBot()) assignServer() else null
+        if (jobId != null) {
+            try {
+                logEvent("Relaunch into assigned server $jobId")
+                hopTo(MAIN_PLACE_ID, jobId)
+                return
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to launch assigned server", e)
+                logEvent("Relaunch into assigned server failed: ${e.message ?: "unknown error"} - using the share link")
+            }
+        }
+        try {
             Runtime.getRuntime().exec(arrayOf("su", "-c", "am start -a android.intent.action.VIEW -d \"$DEEPLINK\""))
             Log.d(TAG, "Launched deeplink via am start")
             logEvent("Relaunch triggered: $DEEPLINK")
-            true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to open deeplink", e)
             logEvent("Relaunch failed: ${e.message ?: "unknown error"}")
-            false
         }
     }
 
